@@ -1,10 +1,12 @@
 # ui.py
 import sys
+import json
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QTabWidget,
     QSplitter, QLabel, QTextEdit, QMessageBox, QDialog, QFormLayout,
-    QListWidget, QMenu, QAbstractItemView, QInputDialog, QRubberBand, QTabBar, QCheckBox
+    QListWidget, QMenu, QAbstractItemView, QInputDialog, QRubberBand, QTabBar, QCheckBox, QTableWidget,
+    QTableWidgetItem, QHeaderView, QFrame, QGridLayout
 )
 from PySide6.QtCore import Qt, QRectF, QPointF, QRect, QPoint, QMimeData, QSettings
 from PySide6.QtGui import QPainter, QColor, QPen, QIntValidator, QDrag
@@ -117,6 +119,11 @@ QTextEdit {
     border: 1px solid #2d2d2d;
     color: #d4d4d4;
 }
+QTableWidget {
+    background-color: #181818;
+    border: 1px solid #2d2d2d;
+    gridline-color: #2d2d2d;
+}
 QMenu {
     background-color: #2d2d2d;
     color: #ffffff;
@@ -206,30 +213,397 @@ class LoginDialog(QDialog):
             self.error_label.setText("인증 실패: 키를 다시 확인하고 입력해주세요.")
 
 
+class DepositDetailDialog(QDialog):
+    def __init__(self, parent=None, api_client=None):
+        super().__init__(parent)
+        self.setWindowTitle("계좌 상세 및 정밀 잔고 조회")
+        self.resize(750, 600)
+        self.api_client = api_client
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        layout.addWidget(QLabel("<b>[상세 자산 및 실현 현황]</b>"))
+        summary_widget = QWidget()
+        self.form_layout = QFormLayout(summary_widget)
+
+        self.inv_lbl = QLabel("0 원")
+        self.today_pnl_lbl = QLabel("0 원")
+        self.entr_lbl = QLabel("0 원")
+        self.ord_alow_lbl = QLabel("0 원")
+
+        self.form_layout.addRow("총 투자원금(매입금액):", self.inv_lbl)
+        self.form_layout.addRow("당일 실현손익:", self.today_pnl_lbl)
+        self.form_layout.addRow("예수금:", self.entr_lbl)
+        self.form_layout.addRow("주문 가능 금액:", self.ord_alow_lbl)
+        layout.addWidget(summary_widget)
+
+        layout.addWidget(QLabel("<b>[체결 잔고 정밀 조회 - 신용/대출 상세]</b>"))
+        self.balance_table = QTableWidget(0, 7)
+        self.balance_table.setHorizontalHeaderLabels(["종목명", "신용구분", "대출일", "만기일", "담보비율", "보유수량", "평가손익"])
+        self.balance_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.balance_table)
+
+        close_btn = QPushButton("확인")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+
+        self.load_data()
+
+    def load_data(self):
+        if not self.api_client:
+            return
+
+        summary = self.api_client.get_account_summary()
+        self.inv_lbl.setText(summary.get('total_investment', '0 원'))
+        self.today_pnl_lbl.setText(summary.get('today_realized_pnl', '0 원'))
+
+        res_dep = self.api_client.get_deposit_detail()
+        if res_dep:
+            entr = res_dep.get('entr', '0')
+            ord_amt = res_dep.get('ord_alow_amt', '0')
+            self.entr_lbl.setText(f"{int(entr):,} 원" if entr.isdigit() else "0 원")
+            self.ord_alow_lbl.setText(f"{int(ord_amt):,} 원" if ord_amt.isdigit() else "0 원")
+
+        balance_items = self.api_client.get_credit_balance_detail()
+        self.balance_table.setRowCount(len(balance_items))
+        for row, item in enumerate(balance_items):
+            self.balance_table.setItem(row, 0, QTableWidgetItem(item['stk_nm']))
+            self.balance_table.setItem(row, 1, QTableWidgetItem(item['crdt_tp']))
+            self.balance_table.setItem(row, 2, QTableWidgetItem(item['loan_dt']))
+            self.balance_table.setItem(row, 3, QTableWidgetItem(item['exp_dt']))
+            self.balance_table.setItem(row, 4, QTableWidgetItem(f"{item['secu_rt']}%"))
+            self.balance_table.setItem(row, 5, QTableWidgetItem(f"{item['qty']}주"))
+            self.balance_table.setItem(row, 6, QTableWidgetItem(f"{item['eval_pl']}원"))
+
+            for col in range(7):
+                self.balance_table.item(row, col).setTextAlignment(Qt.AlignCenter)
+
+
+class TradeHistoryDialog(QDialog):
+    def __init__(self, parent=None, api_client=None):
+        super().__init__(parent)
+        self.setWindowTitle("체결 / 미체결 통합 내역 조회")
+        self.resize(500, 400)
+        self.api_client = api_client
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        layout.addWidget(QLabel("<b>[당일 체결 및 미체결 현황]</b>"))
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["종목 이름", "가격", "체결/미체결"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        close_btn = QPushButton("확인")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+
+        self.load_data()
+
+    def load_data(self):
+        if not self.api_client:
+            return
+
+        items = self.api_client.get_trade_history()
+        self.table.setRowCount(len(items))
+        for row, (stk_nm, price, status) in enumerate(items):
+            item_name = QTableWidgetItem(stk_nm)
+            item_price = QTableWidgetItem(price)
+            item_status = QTableWidgetItem(status)
+
+            item_name.setTextAlignment(Qt.AlignCenter)
+            item_price.setTextAlignment(Qt.AlignCenter)
+            item_status.setTextAlignment(Qt.AlignCenter)
+
+            if status == "체결":
+                item_status.setForeground(QColor("#26a69a"))
+            else:
+                item_status.setForeground(QColor("#ef5350"))
+
+            self.table.setItem(row, 0, item_name)
+            self.table.setItem(row, 1, item_price)
+            self.table.setItem(row, 2, item_status)
+
+
+class PortfolioDialog(QDialog):
+    def __init__(self, parent=None, api_client=None):
+        super().__init__(parent)
+        self.setWindowTitle("보유종목 잔고 상세 조회")
+        self.resize(650, 450)
+        self.api_client = api_client
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        layout.addWidget(QLabel("<b>[보유종목 잔고 현황]</b>"))
+
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["종목명", "보유수량", "매입단가", "현재가", "평가손익", "수익률"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        close_btn = QPushButton("확인")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+
+        self.load_data()
+
+    def load_data(self):
+        if not self.api_client:
+            return
+
+        items = self.api_client.get_portfolio_holdings()
+        self.table.setRowCount(len(items))
+        for row, item in enumerate(items):
+            name_item = QTableWidgetItem(item['stk_nm'])
+            qty_item = QTableWidgetItem(f"{int(item['qty']):,} 주" if str(item['qty']).isdigit() else f"{item['qty']} 주")
+            puch_item = QTableWidgetItem(
+                f"{int(item['puch_prc']):,} 원" if str(item['puch_prc']).isdigit() else f"{item['puch_prc']} 원")
+            now_item = QTableWidgetItem(
+                f"{int(item['now_prc']):,} 원" if str(item['now_prc']).isdigit() else f"{item['now_prc']} 원")
+
+            pl_val = str(item['evlt_pl'])
+            pl_str = f"{int(pl_val):,} 원" if pl_val.lstrip('-').isdigit() else f"{pl_val} 원"
+            pl_item = QTableWidgetItem(pl_str)
+
+            rt_item = QTableWidgetItem(f"{item['prft_rt']}%")
+
+            for col, itm in enumerate([name_item, qty_item, puch_item, now_item, pl_item, rt_item]):
+                itm.setTextAlignment(Qt.AlignCenter)
+                if col in [4, 5]:
+                    val_str = itm.text().replace(',', '').replace(' 원', '').replace('%', '')
+                    try:
+                        fval = float(val_str)
+                        if fval > 0:
+                            itm.setForeground(QColor("#ef5350"))
+                        elif fval < 0:
+                            itm.setForeground(QColor("#26a69a"))
+                    except ValueError:
+                        pass
+                self.table.setItem(row, col, itm)
+
+
+class RealizedPLDialog(QDialog):
+    def __init__(self, parent=None, api_client=None):
+        super().__init__(parent)
+        self.setWindowTitle("실현손익 및 세부 통계 조회")
+        self.resize(800, 550)
+        self.api_client = api_client
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        layout.addWidget(QLabel("<b>[기간별 총괄 손익 요약]</b>"))
+        summary_widget = QWidget()
+        self.form_layout = QFormLayout(summary_widget)
+
+        self.tot_buy_lbl = QLabel("0 원")
+        self.tot_sell_lbl = QLabel("0 원")
+        self.tot_pl_lbl = QLabel("0 원")
+        self.tot_fee_lbl = QLabel("0 원")
+        self.tot_tax_lbl = QLabel("0 원")
+
+        self.form_layout.addRow("총 매수금액:", self.tot_buy_lbl)
+        self.form_layout.addRow("총 매도금액:", self.tot_sell_lbl)
+        self.form_layout.addRow("실현손익:", self.tot_pl_lbl)
+        self.form_layout.addRow("매매수수료:", self.tot_fee_lbl)
+        self.form_layout.addRow("매매세금:", self.tot_tax_lbl)
+        layout.addWidget(summary_widget)
+
+        layout.addWidget(QLabel("<b>[일자별·종목별 세부 손익 및 수익률 통계]</b>"))
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["거래일자", "종목명", "매수금액", "매도금액", "실현손익", "수익률", "수수료/세금"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        close_btn = QPushButton("확인")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+
+        self.load_data()
+
+    def load_data(self):
+        if not self.api_client:
+            return
+
+        summary = self.api_client.get_realized_pl_summary()
+        if summary:
+            b_amt = summary.get('tot_puch_amt', '0')
+            s_amt = summary.get('tot_sell_amt', '0')
+            p_amt = summary.get('tot_rlzt_prft', '0')
+            f_amt = summary.get('tot_fee', '0')
+            t_amt = summary.get('tot_tax', '0')
+
+            self.tot_buy_lbl.setText(f"{int(b_amt):,} 원" if b_amt.isdigit() else "0 원")
+            self.tot_sell_lbl.setText(f"{int(s_amt):,} 원" if s_amt.isdigit() else "0 원")
+            self.tot_pl_lbl.setText(f"{int(p_amt):,} 원" if p_amt.lstrip('-').isdigit() else "0 원")
+            self.tot_fee_lbl.setText(f"{int(f_amt):,} 원" if f_amt.isdigit() else "0 원")
+            self.tot_tax_lbl.setText(f"{int(t_amt):,} 원" if t_amt.isdigit() else "0 원")
+
+        items = self.api_client.get_realized_pl_details()
+        self.table.setRowCount(len(items))
+        for row, item in enumerate(items):
+            date_item = QTableWidgetItem(item['date'])
+            name_item = QTableWidgetItem(item['stk_nm'])
+
+            b_str = item['buy_amt']
+            buy_item = QTableWidgetItem(f"{int(b_str):,} 원" if b_str.isdigit() else f"{b_str} 원")
+
+            s_str = item['sell_amt']
+            sell_item = QTableWidgetItem(f"{int(s_str):,} 원" if s_str.isdigit() else f"{s_str} 원")
+
+            pl_str = item['rlzt_pl']
+            pl_item = QTableWidgetItem(f"{int(pl_str):,} 원" if pl_str.lstrip('-').isdigit() else f"{pl_str} 원")
+
+            rt_item = QTableWidgetItem(f"{item['prft_rt']}%")
+            fee_tax_item = QTableWidgetItem(f"수수료 {item['fee']} / 세금 {item['tax']}")
+
+            for col, itm in enumerate([date_item, name_item, buy_item, sell_item, pl_item, rt_item, fee_tax_item]):
+                itm.setTextAlignment(Qt.AlignCenter)
+                if col == 4:
+                    val_str = itm.text().replace(',', '').replace(' 원', '')
+                    try:
+                        fval = float(val_str)
+                        if fval > 0:
+                            itm.setForeground(QColor("#ef5350"))
+                        elif fval < 0:
+                            itm.setForeground(QColor("#26a69a"))
+                    except ValueError:
+                        pass
+                self.table.setItem(row, col, itm)
+
+
+class DailyJournalDialog(QDialog):
+    def __init__(self, parent=None, api_client=None):
+        super().__init__(parent)
+        self.setWindowTitle("당일 매매일지 조회")
+        self.resize(850, 600)
+        self.api_client = api_client
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        layout.addWidget(QLabel("<b>[당일 총괄 매매 요약]</b>"))
+        summary_widget = QWidget()
+        self.form_layout = QFormLayout(summary_widget)
+
+        self.tot_pl_lbl = QLabel("0 원")
+        self.tot_rt_lbl = QLabel("0.0%")
+        self.tot_fee_tax_lbl = QLabel("0 원")
+        self.tot_sttl_lbl = QLabel("0 원")
+
+        self.form_layout.addRow("총 손익금액:", self.tot_pl_lbl)
+        self.form_layout.addRow("총 수익률:", self.tot_rt_lbl)
+        self.form_layout.addRow("총 매매수수료/세금:", self.tot_fee_tax_lbl)
+        self.form_layout.addRow("총 정산금액:", self.tot_sttl_lbl)
+        layout.addWidget(summary_widget)
+
+        layout.addWidget(QLabel("<b>[종목별 상세 매매일지 목록]</b>"))
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels(["종목명", "매수평균가", "매도평균가", "매수수량", "매도수량", "실현손익금", "수익률", "수수료/세금"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
+
+        close_btn = QPushButton("확인")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+
+        self.load_data()
+
+    def load_data(self):
+        if not self.api_client:
+            return
+
+        summary, items = self.api_client.get_daily_trading_journal()
+
+        pl_val = summary.get('tot_rlzt_prft', '0')
+        rt_val = summary.get('tot_prft_rt', '0.0')
+        ft_val = summary.get('tot_fee_tax', '0')
+        st_val = summary.get('tot_sttl_amt', '0')
+
+        self.tot_pl_lbl.setText(f"{int(pl_val):,} 원" if pl_val.lstrip('-').isdigit() else f"{pl_val} 원")
+        self.tot_rt_lbl.setText(f"{rt_val}%")
+        self.tot_fee_tax_lbl.setText(f"{int(ft_val):,} 원" if ft_val.isdigit() else f"{ft_val} 원")
+        self.tot_sttl_lbl.setText(f"{int(st_val):,} 원" if st_val.lstrip('-').isdigit() else f"{st_val} 원")
+
+        self.table.setRowCount(len(items))
+        for row, item in enumerate(items):
+            name_item = QTableWidgetItem(item['stk_nm'])
+
+            b_unp = item['buy_unp']
+            buy_unp_item = QTableWidgetItem(f"{int(b_unp):,} 원" if b_unp.isdigit() else f"{b_unp} 원")
+
+            s_unp = item['sell_unp']
+            sell_unp_item = QTableWidgetItem(f"{int(s_unp):,} 원" if s_unp.isdigit() else f"{s_unp} 원")
+
+            b_qty = item['buy_qty']
+            buy_qty_item = QTableWidgetItem(f"{int(b_qty):,} 주" if b_qty.isdigit() else f"{b_qty} 주")
+
+            s_qty = item['sell_qty']
+            sell_qty_item = QTableWidgetItem(f"{int(s_qty):,} 주" if s_qty.isdigit() else f"{s_qty} 주")
+
+            pl_str = item['rlzt_prft']
+            pl_item = QTableWidgetItem(f"{int(pl_str):,} 원" if pl_str.lstrip('-').isdigit() else f"{pl_str} 원")
+
+            rt_item = QTableWidgetItem(f"{item['prft_rt']}%")
+            fee_tax_item = QTableWidgetItem(f"수수료 {item['fee']} / 세금 {item['tax']}")
+
+            for col, itm in enumerate(
+                    [name_item, buy_unp_item, sell_unp_item, buy_qty_item, sell_qty_item, pl_item, rt_item,
+                     fee_tax_item]):
+                itm.setTextAlignment(Qt.AlignCenter)
+                if col in [5, 6]:
+                    val_str = itm.text().replace(',', '').replace(' 원', '').replace('%', '')
+                    try:
+                        fval = float(val_str)
+                        if fval > 0:
+                            itm.setForeground(QColor("#ef5350"))
+                        elif fval < 0:
+                            itm.setForeground(QColor("#26a69a"))
+                    except ValueError:
+                        pass
+                self.table.setItem(row, col, itm)
+
+
 class MyAccountDialog(QDialog):
     def __init__(self, parent=None, current_user_name="사용자", api_client=None):
         super().__init__(parent)
         self.setWindowTitle("내 계좌 정보")
-        self.resize(450, 300)
+        self.resize(480, 600)
         self.user_name = current_user_name
         self.api_client = api_client
+        self.settings = QSettings("KiwoomTrading", "AutoTrader")
 
         self.is_connected = self.api_client.check_connection() if self.api_client else False
 
         self.raw_account_no = ""
         self.cash_balance = "0 원"
-        self.total_pnl = "0 원 (0%)"
+        self.total_pnl = "0 원"
+        self.total_eval = "0 원"
+        self.crdt_secu_rt = "100.0%"
+        self.eval_return_rate = "0.0%"
+        self.realized_return_rate = "0.0%"
+        self.today_total_return_rate = "0.0%"
+        unexec, exec_cnt = 0, 0
 
         if self.api_client and self.is_connected:
             data = self.api_client.get_account_summary()
             self.raw_account_no = data.get('account_no', '')
             self.cash_balance = data.get('cash_balance', '0 원')
-            self.total_pnl = data.get('total_profit_loss', '0 원 (0%)')
+            self.total_pnl = data.get('total_profit_loss', '0 원')
+            self.total_eval = data.get('total_eval_amount', '0 원')
+            self.crdt_secu_rt = data.get('crdt_secu_rt', '100.0%')
+            self.eval_return_rate = data.get('eval_return_rate', '0.0%')
+            self.realized_return_rate = data.get('realized_return_rate', '0.0%')
+            self.today_total_return_rate = data.get('today_total_return_rate', '0.0%')
+            unexec, exec_cnt = self.api_client.get_trade_counts()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        # 상단: 타이틀 및 연동 확인 UI 뱃지
         top_bar_layout = QHBoxLayout()
         dialog_title = QLabel("<b>[내 계좌 정보]</b>")
 
@@ -245,7 +619,6 @@ class MyAccountDialog(QDialog):
 
         form_layout = QFormLayout()
 
-        # 1. 이름
         user_layout = QHBoxLayout()
         self.user_label = QLabel(f"<b>{self.user_name}</b>")
         change_name_btn = QPushButton("이름 변경")
@@ -255,7 +628,6 @@ class MyAccountDialog(QDialog):
         user_layout.addWidget(change_name_btn)
         user_layout.addStretch()
 
-        # 2. 계좌번호 (뒤 4자리 마스킹 + 누르고 있을 때 보기 버튼)
         account_layout = QHBoxLayout()
         masked_acc = self.mask_account(self.raw_account_no)
         self.account_label = QLabel(f"<b>{masked_acc}</b>")
@@ -270,18 +642,34 @@ class MyAccountDialog(QDialog):
         account_layout.addWidget(self.show_acc_btn)
         account_layout.addStretch()
 
-        # 3. 현금잔고
-        self.cash_label = QLabel(f"<b>{self.cash_balance}</b>")
-
-        # 4. 평가손익 (금액, %)
-        self.total_pnl_label = QLabel(f"<b>{self.total_pnl}</b>")
-
         form_layout.addRow("이름:", user_layout)
         form_layout.addRow("계좌번호:", account_layout)
-        form_layout.addRow("현금잔고:", self.cash_label)
-        form_layout.addRow("평가손익:", self.total_pnl_label)
 
         layout.addLayout(form_layout)
+
+        grid_layout = QGridLayout()
+        grid_layout.setSpacing(8)
+
+        def create_card(title, value_str):
+            card = QFrame()
+            card.setStyleSheet("background-color: #181818; border: 1px solid #2d2d2d; border-radius: 4px;")
+            l = QVBoxLayout(card)
+            l.setContentsMargins(10, 8, 10, 8)
+            l.setSpacing(2)
+            l.addWidget(QLabel(f"<font color='#858585' size='2'>{title}</font>"))
+            l.addWidget(QLabel(f"<b>{value_str}</b>"))
+            return card
+
+        grid_layout.addWidget(create_card("계좌 현금", self.cash_balance), 0, 0)
+        grid_layout.addWidget(create_card("총 평가금액", self.total_eval), 0, 1)
+        grid_layout.addWidget(create_card("평가손익", self.total_pnl), 1, 0)
+        grid_layout.addWidget(create_card("평가손익률", self.eval_return_rate), 1, 1)
+        grid_layout.addWidget(create_card("당일 총 수익률", self.today_total_return_rate), 2, 0)
+        grid_layout.addWidget(create_card("실현손익률", self.realized_return_rate), 2, 1)
+        grid_layout.addWidget(create_card("신용담보비율", self.crdt_secu_rt), 3, 0)
+        grid_layout.addWidget(create_card("체결 / 미체결", f"체결 {exec_cnt} | 미체결 {unexec}"), 3, 1)
+
+        layout.addLayout(grid_layout)
         layout.addStretch()
 
         close_btn = QPushButton("확인")
@@ -320,6 +708,7 @@ class MyAccountDialog(QDialog):
         if ok and new_name.strip():
             self.user_name = new_name.strip()
             self.user_label.setText(f"<b>{self.user_name}</b>")
+            self.settings.setValue("user_name", self.user_name)
 
 
 class DraggableTabBar(QTabBar):
@@ -357,6 +746,7 @@ class SelectionTreeWidget(QTreeWidget):
         self.is_dragging = False
         self.initial_selection = []
         self.setAcceptDrops(True)
+        self.settings = QSettings("KiwoomTrading", "AutoTrader")
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
@@ -383,6 +773,7 @@ class SelectionTreeWidget(QTreeWidget):
                 new_stock.setBackground(0, QColor("#181818"))
                 target_group.setExpanded(True)
                 event.acceptProposedAction()
+                self.main_window.save_tree_state()
                 return
         super().dropEvent(event)
 
@@ -443,6 +834,7 @@ class SelectionTreeWidget(QTreeWidget):
                     if idx != -1:
                         self.takeTopLevelItem(idx)
             event.accept()
+            self.main_window.save_tree_state()
             return
         super().keyPressEvent(event)
 
@@ -509,7 +901,8 @@ class TradingUI(QMainWindow):
         self.showMaximized()
 
         self.api_client = api_client
-        self.current_user_name = "사용자"
+        self.settings = QSettings("KiwoomTrading", "AutoTrader")
+        self.current_user_name = self.settings.value("user_name", "사용자")
         self.stock_list = self.api_client.get_stock_list()
 
         central_widget = QWidget()
@@ -536,18 +929,40 @@ class TradingUI(QMainWindow):
         self.search_btn = QPushButton("검색")
         self.search_btn.clicked.connect(self.on_search)
 
-        self.my_btn = QPushButton("my")
-        self.my_btn.clicked.connect(self.open_my_dialog)
-
         top_layout.addLayout(search_container, 3)
         top_layout.addWidget(self.search_btn)
         top_layout.addStretch(5)
+
+        self.detail_btn = QPushButton("계좌 현금 및 증거금 상세 조회")
+        self.detail_btn.clicked.connect(self.open_detail_dialog_from_main)
+        top_layout.addWidget(self.detail_btn)
+
+        self.history_btn = QPushButton("체결 / 미체결 내역 조회")
+        self.history_btn.clicked.connect(self.open_trade_history_dialog)
+        top_layout.addWidget(self.history_btn)
+
+        self.portfolio_btn = QPushButton("보유종목 잔고 조회")
+        self.portfolio_btn.clicked.connect(self.open_portfolio_dialog)
+        top_layout.addWidget(self.portfolio_btn)
+
+        self.realized_pl_btn = QPushButton("실현손익 및 통계 조회")
+        self.realized_pl_btn.clicked.connect(self.open_realized_pl_dialog)
+        top_layout.addWidget(self.realized_pl_btn)
+
+        self.daily_journal_btn = QPushButton("당일 매매일지 조회")
+        self.daily_journal_btn.clicked.connect(self.open_daily_journal_dialog)
+        top_layout.addWidget(self.daily_journal_btn)
+
+        self.my_btn = QPushButton("my")
+        self.my_btn.setFixedSize(45, 32)
+        self.my_btn.clicked.connect(self.open_my_dialog)
         top_layout.addWidget(self.my_btn)
+
         main_layout.addLayout(top_layout)
 
         body_splitter = QSplitter(Qt.Horizontal)
 
-        self.tree_widget = SelectionTreeWidget(self)
+        self.tree_widget = SelectionTreeWidget(self, self)
         self.tree_widget.setHeaderLabel("관심 그룹 박스")
         self.tree_widget.setIndentation(24)
         self.tree_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -560,15 +975,9 @@ class TradingUI(QMainWindow):
         self.tree_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_widget.customContextMenuRequested.connect(self.show_tree_context_menu)
         self.tree_widget.itemClicked.connect(self.on_tree_item_clicked)
+        self.tree_widget.itemChanged.connect(lambda item, col: self.save_tree_state())
 
-        def create_group_node(parent, text):
-            node = QTreeWidgetItem(parent, [text])
-            node.setFlags(node.flags() | Qt.ItemIsEditable | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
-            node.setBackground(0, QColor("#1c1c1c"))
-            return node
-
-        create_group_node(self.tree_widget, "기본 그룹")
-        self.tree_widget.expandAll()
+        self.load_tree_state()
         body_splitter.addWidget(self.tree_widget)
 
         right_container = QWidget()
@@ -584,6 +993,68 @@ class TradingUI(QMainWindow):
         body_splitter.addWidget(right_container)
         body_splitter.setSizes([280, 970])
         main_layout.addWidget(body_splitter)
+
+    def save_tree_state(self):
+        """트리 위젯의 전체 구조를 JSON으로 직렬화하여 QSettings에 저장"""
+
+        def serialize_item(item):
+            children = [serialize_item(item.child(i)) for i in range(item.childCount())]
+            return {
+                "text": item.text(0),
+                "is_stock": self.is_stock_item(item),
+                "children": children
+            }
+
+        root_items = []
+        for i in range(self.tree_widget.topLevelItemCount()):
+            root_items.append(serialize_item(self.tree_widget.topLevelItem(i)))
+
+        try:
+            json_str = json.dumps(root_items, ensure_ascii=False)
+            self.settings.setValue("tree_state", json_str)
+        except Exception:
+            pass
+
+    def load_tree_state(self):
+        """저장된 트리 구조를 불러와 복원"""
+        json_str = self.settings.value("tree_state", "")
+        if not json_str:
+            # 기본값 설정
+            default_node = QTreeWidgetItem(self.tree_widget, ["기본 그룹"])
+            default_node.setFlags(
+                default_node.flags() | Qt.ItemIsEditable | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
+            default_node.setBackground(0, QColor("#1c1c1c"))
+            self.tree_widget.expandAll()
+            return
+
+        try:
+            root_items = json.loads(json_str)
+            self.tree_widget.clear()
+
+            def deserialize_item(parent, data):
+                text = data.get("text", "그룹")
+                is_stock = data.get("is_stock", False)
+                node = QTreeWidgetItem(parent, [text])
+                if is_stock:
+                    node.setFlags((node.flags() & ~Qt.ItemIsEditable) | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
+                    node.setBackground(0, QColor("#181818"))
+                else:
+                    node.setFlags(node.flags() | Qt.ItemIsEditable | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
+                    node.setBackground(0, QColor("#1c1c1c"))
+
+                for child_data in data.get("children", []):
+                    deserialize_item(node, child_data)
+
+            for data in root_items:
+                deserialize_item(self.tree_widget, data)
+
+            self.tree_widget.expandAll()
+        except Exception:
+            default_node = QTreeWidgetItem(self.tree_widget, ["기본 그룹"])
+            default_node.setFlags(
+                default_node.flags() | Qt.ItemIsEditable | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
+            default_node.setBackground(0, QColor("#1c1c1c"))
+            self.tree_widget.expandAll()
 
     def is_group_item(self, item):
         return item.childCount() > 0 or item.parent() is None or not self.is_stock_item(item)
@@ -610,6 +1081,7 @@ class TradingUI(QMainWindow):
                     (new_stock.flags() & ~Qt.ItemIsEditable) | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
                 new_stock.setBackground(0, QColor("#181818"))
                 item.setExpanded(True)
+                self.save_tree_state()
             elif item and is_group and action == add_sub_action:
                 name, ok = QInputDialog.getText(self, "하위 그룹 추가", "하위 그룹 이름을 입력하세요:")
                 if ok and name.strip():
@@ -618,6 +1090,7 @@ class TradingUI(QMainWindow):
                         new_item.flags() | Qt.ItemIsEditable | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
                     new_item.setBackground(0, QColor("#1c1c1c"))
                     item.setExpanded(True)
+                    self.save_tree_state()
             elif action == delete_action:
                 parent = item.parent()
                 if parent:
@@ -626,6 +1099,7 @@ class TradingUI(QMainWindow):
                     idx = self.tree_widget.indexOfTopLevelItem(item)
                     if idx != -1:
                         self.tree_widget.takeTopLevelItem(idx)
+                self.save_tree_state()
         else:
             new_group_action = menu.addAction("새 파일 박스(그룹) 만들기")
             action = menu.exec(self.tree_widget.mapToGlobal(pos))
@@ -636,6 +1110,7 @@ class TradingUI(QMainWindow):
                     new_item.setFlags(
                         new_item.flags() | Qt.ItemIsEditable | Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled)
                     new_item.setBackground(0, QColor("#1c1c1c"))
+                    self.save_tree_state()
 
     def is_stock_item(self, item):
         return item.childCount() == 0 and item.parent() is not None and not (item.flags() & Qt.ItemIsEditable)
@@ -769,6 +1244,26 @@ class TradingUI(QMainWindow):
         dialog = MyAccountDialog(self, current_user_name=self.current_user_name, api_client=self.api_client)
         dialog.exec()
         self.current_user_name = dialog.user_name
+
+    def open_detail_dialog_from_main(self):
+        dialog = DepositDetailDialog(self, api_client=self.api_client)
+        dialog.exec()
+
+    def open_trade_history_dialog(self):
+        dialog = TradeHistoryDialog(self, api_client=self.api_client)
+        dialog.exec()
+
+    def open_portfolio_dialog(self):
+        dialog = PortfolioDialog(self, api_client=self.api_client)
+        dialog.exec()
+
+    def open_realized_pl_dialog(self):
+        dialog = RealizedPLDialog(self, api_client=self.api_client)
+        dialog.exec()
+
+    def open_daily_journal_dialog(self):
+        dialog = DailyJournalDialog(self, api_client=self.api_client)
+        dialog.exec()
 
     def on_trade_executed(self, stock_name, action_type, qty):
         success = self.api_client.execute_order(stock_name, action_type, int(qty))
